@@ -77,37 +77,65 @@ def fetch_lunarcrush_creators(topic="crypto", limit=5):
     return resp.json().get("data", []) if resp.status_code == 200 else []
 
 def run_monitor():
-    print(f"[{datetime.now()}] LunarCrush 扫描开始...")
+    print(f"[{datetime.now()}] LunarCrush 多话题扫描开始...（已扩展9大类金融话题）")
     
-    # 使用主要话题 "crypto"（覆盖金融+Crypto全领域）
-    time_data = fetch_lunarcrush_time_series("crypto")
-    posts = fetch_lunarcrush_posts("crypto", 15)
-    creators = fetch_lunarcrush_creators("crypto", 5)
+    # ================== 扩展话题列表（来自 antseer.ai 全库） ==================
+    TOPICS = [
+        "crypto", "bitcoin", "ethereum",      # 加密货币核心
+        "stocks", "equities", "market",       # 股票市场
+        "macro", "economy", "fed",            # 宏观经济 & 央行
+        "geopolitics", "politics",            # 地缘政治 & 政治
+        "institutions", "rwa",                # 机构动向 & RWA
+        "commodities", "energy", "oil",       # 大宗商品 & 能源
+        "forex", "bonds", "treasury"          # 外汇 & 债券
+    ]
     
-    if not time_data or len(time_data) < 2:
-        print("数据不足，跳过本次扫描")
-        return
+    total_volume = 0
+    all_posts = []
+    all_creators = []
     
-    # 热度计算（严格按提示词）
-    current_volume = time_data[-1].get("social_volume", 0)  # 最近1小时
-    prev_volume = sum(item.get("social_volume", 0) for item in time_data[:-1]) // 4  # 前4小时平均
-    growth = ((current_volume - prev_volume) / prev_volume * 100) if prev_volume > 0 else 999
+    for topic in TOPICS:
+        try:
+            # 时间序列（计算增长）
+            time_data = fetch_lunarcrush_time_series(topic)
+            if time_data:
+                current = time_data[-1].get("social_volume", 0)
+                total_volume += current
+            
+            # 最新高互动推文
+            posts = fetch_lunarcrush_posts(topic, 8)   # 每个话题取8条
+            all_posts.extend(posts)
+            
+            # KOL
+            creators = fetch_lunarcrush_creators(topic, 3)
+            all_creators.extend(creators)
+            
+        except Exception as e:
+            print(f"  └─ 话题 {topic} 数据获取失败（跳过）: {e}")
+            continue
     
-    total_engagement = sum(p.get("interactions", 0) for p in posts)
+    # 去重 & 排序（按互动量）
+    all_posts = sorted(all_posts, key=lambda x: x.get("interactions", 0), reverse=True)[:20]
+    all_creators = sorted(all_creators, key=lambda x: x.get("influence_score", 0), reverse=True)[:8]
     
+    # ================== 热度计算（严格按原始提示词） ==================
+    current_volume = total_volume
     last_volume, _ = get_last_stats()
+    growth = ((current_volume - last_volume) / last_volume * 100) if last_volume > 0 else 999
+    total_engagement = sum(p.get("interactions", 0) for p in all_posts)
+    
     save_stats(current_volume, total_engagement)
     
     # 触发条件（任一满足即报警）
-    if growth >= 300 or total_engagement >= 5000 or current_volume >= prev_volume * 3:
-        print("🚨 检测到热点爆发！生成警报...")
+    if growth >= 300 or total_engagement >= 5000 or current_volume >= last_volume * 3:
+        print("🚨 检测到跨话题热点爆发！生成警报...")
         
-        # 构造给 Grok 的提示（完全按你原始格式）
+        # 构造给 Grok 的提示（自动包含扩展话题数据）
         grok_prompt = f"""你是一个专业的金融&Crypto热点监控AI。请严格按照以下格式输出（只输出Markdown内容，不要多余解释）：
 
 【🚨 金融/Crypto 热点爆发警报】
 **话题**：一句话总结核心事件
-**热度指标**：过去1小时讨论量增长{growth:.1f}%，当前相关推文量约{len(posts)}条
+**热度指标**：过去1小时讨论量增长{growth:.1f}%，当前相关推文量约{len(all_posts)}条
 **触发时间**：{datetime.now().strftime('%Y-%m-%d %H:%M')}（北京时间）
 
 1. 核心推文（Top 3-5条最具代表性）
@@ -125,9 +153,9 @@ def run_monitor():
 立即查看详情 → [X搜索链接]
 本警报由Grok热点监控AI自动生成，如需调整阈值请回复指令。
 
-请基于以下真实数据生成（优先原创高互动内容）：
-推文数据：{json.dumps([{"author": p.get("author", {}).get("screen_name", "unknown"), "text": p.get("text", ""), "interactions": p.get("interactions", 0), "link": f"https://x.com/{p.get('author', {}).get('screen_name','')}/status/{p.get('post_id','')}"} for p in posts[:12]], ensure_ascii=False, indent=2)}
-KOL数据：{json.dumps([{"screen_name": c.get("screen_name", ""), "followers": c.get("followers", 0), "influence": c.get("influence_score", 0)} for c in creators], ensure_ascii=False)}
+请基于以下真实数据生成（优先原创高互动内容，已覆盖 antseer.ai 全部9大类金融话题）：
+推文数据：{json.dumps([{"author": p.get("author", {}).get("screen_name", "unknown"), "text": p.get("text", ""), "interactions": p.get("interactions", 0), "link": f"https://x.com/{p.get('author', {}).get('screen_name','')}/status/{p.get('post_id','')}"} for p in all_posts[:15]], ensure_ascii=False, indent=2)}
+KOL数据：{json.dumps([{"screen_name": c.get("screen_name", ""), "followers": c.get("followers", 0), "influence": c.get("influence_score", 0)} for c in all_creators], ensure_ascii=False)}
 """
 
         # 调用 Grok API 生成警报
@@ -146,9 +174,11 @@ KOL数据：{json.dumps([{"screen_name": c.get("screen_name", ""), "followers": 
             alert_text = grok_resp.json()["choices"][0]["message"]["content"]
             import asyncio
             asyncio.run(send_telegram_alert(alert_text))
-            print("✅ 警报已成功推送到Telegram！")
+            print("✅ 警报已成功推送到Telegram群组！")
         else:
             print(f"Grok API错误: {grok_resp.text}")
+    else:
+        print(f"  当前总热度增长 {growth:.1f}%（未达阈值，继续监控）")
 
 # ================== 定时任务 ==================
 scheduler = BackgroundScheduler()
