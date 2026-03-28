@@ -77,7 +77,7 @@ def fetch_lunarcrush_creators(topic="crypto", limit=5):
     return resp.json().get("data", []) if resp.status_code == 200 else []
 
 def run_monitor():
-    print(f"[{datetime.now()}] LunarCrush 多话题扫描开始...（已扩展9大类金融话题）")
+    print(f"[{datetime.now()}] LunarCrush 多话题扫描开始...（已扩展9大类金融话题 + 测试模式）")
     
     # ================== 扩展话题列表（来自 antseer.ai 全库） ==================
     TOPICS = [
@@ -103,7 +103,7 @@ def run_monitor():
                 total_volume += current
             
             # 最新高互动推文
-            posts = fetch_lunarcrush_posts(topic, 8)   # 每个话题取8条
+            posts = fetch_lunarcrush_posts(topic, 8)
             all_posts.extend(posts)
             
             # KOL
@@ -118,7 +118,7 @@ def run_monitor():
     all_posts = sorted(all_posts, key=lambda x: x.get("interactions", 0), reverse=True)[:20]
     all_creators = sorted(all_creators, key=lambda x: x.get("influence_score", 0), reverse=True)[:8]
     
-    # ================== 热度计算（严格按原始提示词） ==================
+    # ================== 热度计算（测试模式） ==================
     current_volume = total_volume
     last_volume, _ = get_last_stats()
     growth = ((current_volume - last_volume) / last_volume * 100) if last_volume > 0 else 999
@@ -126,11 +126,10 @@ def run_monitor():
     
     save_stats(current_volume, total_engagement)
     
-    # 触发条件（任一满足即报警）
-    if growth >= 300 or total_engagement >= 5000 or current_volume >= last_volume * 3:
-        print("🚨 检测到跨话题热点爆发！生成警报...")
+    # ================== 测试模式触发条件（已降低） ==================
+    if growth >= 50 or total_engagement >= 1000 or current_volume >= last_volume * 1.5:
+        print("🚨【测试模式】检测到热点！生成警报...")
         
-        # 构造给 Grok 的提示（自动包含扩展话题数据）
         grok_prompt = f"""你是一个专业的金融&Crypto热点监控AI。请严格按照以下格式输出（只输出Markdown内容，不要多余解释）：
 
 【🚨 金融/Crypto 热点爆发警报】
@@ -158,7 +157,6 @@ def run_monitor():
 KOL数据：{json.dumps([{"screen_name": c.get("screen_name", ""), "followers": c.get("followers", 0), "influence": c.get("influence_score", 0)} for c in all_creators], ensure_ascii=False)}
 """
 
-        # 调用 Grok API 生成警报
         grok_resp = requests.post(
             "https://api.x.ai/v1/chat/completions",
             headers={"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"},
@@ -178,7 +176,7 @@ KOL数据：{json.dumps([{"screen_name": c.get("screen_name", ""), "followers": 
         else:
             print(f"Grok API错误: {grok_resp.text}")
     else:
-        print(f"  当前总热度增长 {growth:.1f}%（未达阈值，继续监控）")
+        print(f"  当前总热度增长 {growth:.1f}%（未达测试阈值，继续监控）")
 
 # ================== 定时任务 ==================
 scheduler = BackgroundScheduler()
