@@ -21,27 +21,36 @@ BASE_URL = "https://lunarcrush.com/api4/public"
 
 bot = Bot(token=TELEGRAM_TOKEN)
 
-# 初始化历史记录
-conn = sqlite3.connect('history.db')
-conn.execute('''CREATE TABLE IF NOT EXISTS stats 
-                (timestamp TEXT PRIMARY KEY, volume INTEGER, engagement INTEGER)''')
-conn.commit()
+
+# 初始化SQLite（改为每次使用时新建连接，避免线程问题）
+def get_db_connection():
+    conn = sqlite3.connect('history.db', check_same_thread=False)  # 允许跨线程
+    conn.execute('''CREATE TABLE IF NOT EXISTS stats 
+                    (timestamp TEXT PRIMARY KEY, volume INTEGER, engagement INTEGER)''')
+    return conn
+
 
 def get_last_stats():
+    conn = get_db_connection()
     row = conn.execute("SELECT volume, engagement FROM stats ORDER BY timestamp DESC LIMIT 1").fetchone()
+    conn.close()
     return row if row else (0, 0)
 
 def save_stats(volume, engagement):
+    conn = get_db_connection()
     ts = datetime.now().isoformat()
     conn.execute("INSERT INTO stats VALUES (?, ?, ?)", (ts, volume, engagement))
     conn.commit()
+    conn.close()
 
 async def send_telegram_alert(alert_text):
     await bot.send_message(chat_id=CHAT_ID, text=alert_text, parse_mode=ParseMode.MARKDOWN)
 
 def fetch_lunarcrush_time_series(topic="crypto"):
     """获取最近5小时社交量（用于计算增长）"""
-    end = datetime.utcnow()
+
+  from datetime import datetime, timedelta, timezone
+  end = datetime.now(timezone.utc)
     start = end - timedelta(hours=6)
     params = {
         "interval": "hourly",
@@ -58,7 +67,9 @@ def fetch_lunarcrush_time_series(topic="crypto"):
 
 def fetch_lunarcrush_posts(topic="crypto", limit=20):
     """获取最近高互动推文"""
-    end = datetime.utcnow()
+    from datetime import datetime, timedelta, timezone
+
+end = datetime.now(timezone.utc)
     start = end - timedelta(hours=1)
     params = {
         "limit": limit,
@@ -77,18 +88,9 @@ def fetch_lunarcrush_creators(topic="crypto", limit=5):
     return resp.json().get("data", []) if resp.status_code == 200 else []
 
 def run_monitor():
-    print(f"[{datetime.now()}] LunarCrush 多话题扫描开始...（已扩展9大类金融话题 + 测试模式）")
+   print(f"[{datetime.now()}] LunarCrush 多话题扫描开始...（已扩展9大类金融话题 + 测试模式）")
     
-    # ================== 扩展话题列表（来自 antseer.ai 全库） ==================
-    TOPICS = [
-        "crypto", "bitcoin", "ethereum",      # 加密货币核心
-        "stocks", "equities", "market",       # 股票市场
-        "macro", "economy", "fed",            # 宏观经济 & 央行
-        "geopolitics", "politics",            # 地缘政治 & 政治
-        "institutions", "rwa",                # 机构动向 & RWA
-        "commodities", "energy", "oil",       # 大宗商品 & 能源
-        "forex", "bonds", "treasury"          # 外汇 & 债券
-    ]
+    TOPICS = ["crypto", "bitcoin", "ethereum", "stocks", "equities", "market", "macro", "economy", "fed", "geopolitics", "politics", "institutions", "rwa", "commodities", "energy", "oil", "forex", "bonds", "treasury"]
     
     total_volume = 0
     all_posts = []
@@ -96,29 +98,24 @@ def run_monitor():
     
     for topic in TOPICS:
         try:
-            # 时间序列（计算增长）
-            time_data = fetch_lunarcrush_time_series(topic)
+            # 时间序列
+            time_data = fetch_lunarcrush_time_series(topic)  # 你原来的函数保持不变
             if time_data:
                 current = time_data[-1].get("social_volume", 0)
                 total_volume += current
             
-            # 最新高互动推文
             posts = fetch_lunarcrush_posts(topic, 8)
             all_posts.extend(posts)
             
-            # KOL
             creators = fetch_lunarcrush_creators(topic, 3)
             all_creators.extend(creators)
-            
         except Exception as e:
-            print(f"  └─ 话题 {topic} 数据获取失败（跳过）: {e}")
+            print(f"  └─ 话题 {topic} 跳过: {e}")
             continue
     
-    # 去重 & 排序（按互动量）
     all_posts = sorted(all_posts, key=lambda x: x.get("interactions", 0), reverse=True)[:20]
     all_creators = sorted(all_creators, key=lambda x: x.get("influence_score", 0), reverse=True)[:8]
     
-    # ================== 热度计算（测试模式） ==================
     current_volume = total_volume
     last_volume, _ = get_last_stats()
     growth = ((current_volume - last_volume) / last_volume * 100) if last_volume > 0 else 999
@@ -126,9 +123,10 @@ def run_monitor():
     
     save_stats(current_volume, total_engagement)
     
-    # ================== 测试模式触发条件（已降低） ==================
+    # 测试模式阈值
     if growth >= 50 or total_engagement >= 1000 or current_volume >= last_volume * 1.5:
         print("🚨【测试模式】检测到热点！生成警报...")
+       
         
         grok_prompt = f"""你是一个专业的金融&Crypto热点监控AI。请严格按照以下格式输出（只输出Markdown内容，不要多余解释）：
 
