@@ -156,6 +156,23 @@ scheduler.add_job(run_monitor, 'interval', minutes=15)
 scheduler.start()
 
 print("🚀 LunarCrush 24/7 监控系统已启动！每15分钟自动扫描...")
+# ================== 启动立即测试推送 + 错误捕获 ==================
+print("🔧 启动测试：立即尝试推送测试警报...")
+try:
+    test_alert = f"""【🚨 测试警报 - 系统启动成功】
+**话题**：Railway部署测试
+**热度指标**：测试推送
+**触发时间**：{datetime.now().strftime('%Y-%m-%d %H:%M')}（北京时间）
+
+✅ 你的24/7监控机器人已成功上线！
+如果看到这条消息，说明Telegram推送完全正常，后续只会推送真实热点。
+
+本消息为启动测试推送。"""
+    import asyncio
+    asyncio.run(send_telegram_alert(test_alert))
+    print("✅ 测试警报推送成功！请检查Telegram群组")
+except Exception as e:
+    print(f"❌ Telegram推送失败，错误信息：{str(e)}")
 try:
     while True:
         time.sleep(60)
