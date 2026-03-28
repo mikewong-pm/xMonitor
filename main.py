@@ -157,7 +157,7 @@ KOL数据：{json.dumps([{"screen_name": c.get("screen_name", ""), "followers": 
             "https://api.x.ai/v1/chat/completions",
             headers={"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"},
             json={
-                "model": "grok-4.1-fast-reasoning",
+                "model": "grok-4-1-fast-reasoning",
                 "messages": [{"role": "user", "content": grok_prompt}],
                 "temperature": 0.3
             },
