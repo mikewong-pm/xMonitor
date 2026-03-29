@@ -9,7 +9,7 @@ import asyncio
 from apscheduler.schedulers.background import BackgroundScheduler
 from telegram import Bot
 from telegram.constants import ParseMode
-from telegram.request import HTTPXRequest   # ← 新增：解决 PoolTimeout
+from telegram.request import HTTPXRequest   # 解决 PoolTimeout
 
 load_dotenv()
 
@@ -19,9 +19,9 @@ GROK_API_KEY = os.getenv("GROK_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# ================== Telegram Bot（增大连接池 + 超时）==================
+# ================== Telegram Bot（大连接池）==================
 request = HTTPXRequest(
-    connection_pool_size=32,      # ← 关键修复：增大连接池
+    connection_pool_size=32,
     read_timeout=30,
     write_timeout=30,
     connect_timeout=30
@@ -49,7 +49,6 @@ def save_stats(volume, engagement):
     conn.close()
 
 async def send_telegram_alert(alert_text):
-    """带重试的推送"""
     for attempt in range(3):
         try:
             await bot.send_message(chat_id=CHAT_ID, text=alert_text, parse_mode=ParseMode.MARKDOWN)
@@ -57,10 +56,10 @@ async def send_telegram_alert(alert_text):
             return
         except Exception as e:
             print(f"❌ 发送失败（尝试 {attempt+1}/3）：{e}")
-            await asyncio.sleep(2 ** attempt)  # 指数退避
+            await asyncio.sleep(2 ** attempt)
     print("❌ 3次重试后仍失败")
 
-# ================== LunarCrush 函数（已修复 UTC）==================
+# ================== LunarCrush 函数 ==================
 def fetch_lunarcrush_time_series(topic="crypto"):
     end = datetime.now(timezone.utc)
     start = end - timedelta(hours=6)
@@ -121,7 +120,7 @@ def run_monitor():
     
     if growth >= 50 or total_engagement >= 1000 or current_volume >= last_volume * 1.5:
         print("🚨【测试模式】检测到热点！生成警报...")
-        # Grok 提示词保持不变（你原来的版本）
+        
         grok_prompt = f"""你是一个专业的金融&Crypto热点监控AI。请严格按照以下格式输出（只输出Markdown内容，不要多余解释）：
 
 【🚨 金融/Crypto 热点爆发警报】
@@ -152,7 +151,11 @@ KOL数据：{json.dumps([{"screen_name": c.get("screen_name", ""), "followers": 
         grok_resp = requests.post(
             "https://api.x.ai/v1/chat/completions",
             headers={"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"},
-            json={"model": "grok-4.1-fast-reasoning", "messages": [{"role": "user", "content": grok_prompt}], "temperature": 0.3},
+            json={
+                "model": "grok-beta",          # ← 已修正为当前有效模型
+                "messages": [{"role": "user", "content": grok_prompt}],
+                "temperature": 0.3
+            },
             timeout=30
         )
         
