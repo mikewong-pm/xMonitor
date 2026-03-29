@@ -5,9 +5,11 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 import requests
+import asyncio
 from apscheduler.schedulers.background import BackgroundScheduler
 from telegram import Bot
 from telegram.constants import ParseMode
+from telegram.request import HTTPXRequest   # ← 新增：解决 PoolTimeout
 
 load_dotenv()
 
@@ -17,10 +19,16 @@ GROK_API_KEY = os.getenv("GROK_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-BASE_URL = "https://lunarcrush.com/api4/public"
-bot = Bot(token=TELEGRAM_TOKEN)
+# ================== Telegram Bot（增大连接池 + 超时）==================
+request = HTTPXRequest(
+    connection_pool_size=32,      # ← 关键修复：增大连接池
+    read_timeout=30,
+    write_timeout=30,
+    connect_timeout=30
+)
+bot = Bot(token=TELEGRAM_TOKEN, request=request)
 
-# ================== SQLite 跨线程安全连接 ==================
+# ================== SQLite 跨线程安全 ==================
 def get_db_connection():
     conn = sqlite3.connect('history.db', check_same_thread=False)
     conn.execute('''CREATE TABLE IF NOT EXISTS stats 
@@ -41,20 +49,24 @@ def save_stats(volume, engagement):
     conn.close()
 
 async def send_telegram_alert(alert_text):
-    await bot.send_message(chat_id=CHAT_ID, text=alert_text, parse_mode=ParseMode.MARKDOWN)
+    """带重试的推送"""
+    for attempt in range(3):
+        try:
+            await bot.send_message(chat_id=CHAT_ID, text=alert_text, parse_mode=ParseMode.MARKDOWN)
+            print("✅ 警报已成功推送到Telegram群组！")
+            return
+        except Exception as e:
+            print(f"❌ 发送失败（尝试 {attempt+1}/3）：{e}")
+            await asyncio.sleep(2 ** attempt)  # 指数退避
+    print("❌ 3次重试后仍失败")
 
-# ================== LunarCrush API 函数 ==================
+# ================== LunarCrush 函数（已修复 UTC）==================
 def fetch_lunarcrush_time_series(topic="crypto"):
     end = datetime.now(timezone.utc)
     start = end - timedelta(hours=6)
-    params = {
-        "interval": "hourly",
-        "limit": 6,
-        "start": start.isoformat(),
-        "end": end.isoformat()
-    }
+    params = {"interval": "hourly", "limit": 6, "start": start.isoformat(), "end": end.isoformat()}
     headers = {"Authorization": f"Bearer {LUNARCRUSH_TOKEN}"}
-    resp = requests.get(f"{BASE_URL}/topic/{topic}/time-series/v2", headers=headers, params=params)
+    resp = requests.get(f"https://lunarcrush.com/api4/public/topic/{topic}/time-series/v2", headers=headers, params=params)
     if resp.status_code != 200:
         print(f"LunarCrush 时间序列错误 {topic}: {resp.text}")
         return []
@@ -63,34 +75,21 @@ def fetch_lunarcrush_time_series(topic="crypto"):
 def fetch_lunarcrush_posts(topic="crypto", limit=8):
     end = datetime.now(timezone.utc)
     start = end - timedelta(hours=1)
-    params = {
-        "limit": limit,
-        "sort": "interactions_desc",
-        "start": start.isoformat(),
-        "end": end.isoformat()
-    }
+    params = {"limit": limit, "sort": "interactions_desc", "start": start.isoformat(), "end": end.isoformat()}
     headers = {"Authorization": f"Bearer {LUNARCRUSH_TOKEN}"}
-    resp = requests.get(f"{BASE_URL}/topic/{topic}/posts/v1", headers=headers, params=params)
+    resp = requests.get(f"https://lunarcrush.com/api4/public/topic/{topic}/posts/v1", headers=headers, params=params)
     return resp.json().get("data", []) if resp.status_code == 200 else []
 
 def fetch_lunarcrush_creators(topic="crypto", limit=3):
     headers = {"Authorization": f"Bearer {LUNARCRUSH_TOKEN}"}
-    resp = requests.get(f"{BASE_URL}/topic/{topic}/creators/v1", headers=headers, params={"limit": limit, "period": "day"})
+    resp = requests.get(f"https://lunarcrush.com/api4/public/topic/{topic}/creators/v1", headers=headers, params={"limit": limit, "period": "day"})
     return resp.json().get("data", []) if resp.status_code == 200 else []
 
 # ================== 核心监控函数 ==================
 def run_monitor():
     print(f"[{datetime.now()}] LunarCrush 多话题扫描开始...（已扩展9大类金融话题 + 测试模式）")
     
-    TOPICS = [
-        "crypto", "bitcoin", "ethereum",
-        "stocks", "equities", "market",
-        "macro", "economy", "fed",
-        "geopolitics", "politics",
-        "institutions", "rwa",
-        "commodities", "energy", "oil",
-        "forex", "bonds", "treasury"
-    ]
+    TOPICS = ["crypto", "bitcoin", "ethereum", "stocks", "equities", "market", "macro", "economy", "fed", "geopolitics", "politics", "institutions", "rwa", "commodities", "energy", "oil", "forex", "bonds", "treasury"]
     
     total_volume = 0
     all_posts = []
@@ -102,10 +101,8 @@ def run_monitor():
             if time_data:
                 current = time_data[-1].get("social_volume", 0)
                 total_volume += current
-            
             posts = fetch_lunarcrush_posts(topic, 8)
             all_posts.extend(posts)
-            
             creators = fetch_lunarcrush_creators(topic, 3)
             all_creators.extend(creators)
         except Exception as e:
@@ -122,10 +119,9 @@ def run_monitor():
     
     save_stats(current_volume, total_engagement)
     
-    # 测试模式触发条件（降低阈值）
     if growth >= 50 or total_engagement >= 1000 or current_volume >= last_volume * 1.5:
         print("🚨【测试模式】检测到热点！生成警报...")
-        
+        # Grok 提示词保持不变（你原来的版本）
         grok_prompt = f"""你是一个专业的金融&Crypto热点监控AI。请严格按照以下格式输出（只输出Markdown内容，不要多余解释）：
 
 【🚨 金融/Crypto 热点爆发警报】
@@ -156,32 +152,26 @@ KOL数据：{json.dumps([{"screen_name": c.get("screen_name", ""), "followers": 
         grok_resp = requests.post(
             "https://api.x.ai/v1/chat/completions",
             headers={"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": "grok-4-1-fast-reasoning",
-                "messages": [{"role": "user", "content": grok_prompt}],
-                "temperature": 0.3
-            },
+            json={"model": "grok-4.1-fast-reasoning", "messages": [{"role": "user", "content": grok_prompt}], "temperature": 0.3},
             timeout=30
         )
         
         if grok_resp.status_code == 200:
             alert_text = grok_resp.json()["choices"][0]["message"]["content"]
-            import asyncio
             asyncio.run(send_telegram_alert(alert_text))
-            print("✅ 警报已成功推送到Telegram群组！")
         else:
             print(f"Grok API错误: {grok_resp.text}")
     else:
         print(f"  当前总热度增长 {growth:.1f}%（未达测试阈值，继续监控）")
 
-# ================== 定时任务 + 启动测试 ==================
+# ================== 启动 ==================
 scheduler = BackgroundScheduler()
 scheduler.add_job(run_monitor, 'interval', minutes=15)
 scheduler.start()
 
 print("🚀 LunarCrush 24/7 监控系统已启动！每15分钟自动扫描...")
 
-# 启动立即测试推送
+# 启动测试推送
 print("🔧 启动测试：立即尝试推送测试警报...")
 try:
     test_alert = f"""【🚨 测试警报 - 系统启动成功】
@@ -190,14 +180,10 @@ try:
 **触发时间**：{datetime.now().strftime('%Y-%m-%d %H:%M')}（北京时间）
 
 ✅ 你的24/7监控机器人已成功上线！
-如果看到这条消息，说明Telegram推送完全正常，后续只会推送真实热点。
-
 本消息为启动测试推送。"""
-    import asyncio
     asyncio.run(send_telegram_alert(test_alert))
-    print("✅ 测试警报推送成功！请检查Telegram群组")
 except Exception as e:
-    print(f"❌ Telegram推送失败，错误信息：{str(e)}")
+    print(f"❌ 启动测试推送失败：{e}")
 
 try:
     while True:
